@@ -1,0 +1,167 @@
+---
+- name: Create directory
+  file:
+    path: "{{ runner_dir }}"
+    state: directory
+    mode: 0755
+    owner: "{{ runner_user }}"
+  tags:
+    - install
+
+- name: Find the latest runner version (RUN ONCE)
+  uri:
+    url: "https://api.github.com/repos/actions/runner/releases/latest"
+    headers:
+      Content-Type: "application/json"
+    method: GET
+    return_content: yes
+    status_code: 200
+    body_format: json
+  register: api_response
+  run_once: yes
+  become: false
+  delegate_to: localhost
+  when: runner_version == "latest"
+  tags:
+    - install
+
+- name: Set runner_version variable (if it is latest)
+  set_fact:
+    runner_version: "{{ api_response.json.tag_name | regex_replace('^v', '') }}"
+  when: runner_version == "latest"
+
+- name: Check if desired version already installed
+  command: "grep -i {{ runner_version }} {{ runner_dir }}/bin/Runner.Listener.deps.json"
+  register: runner_installed
+  changed_when: False
+  ignore_errors: yes
+  tags:
+    - install
+
+- name:  Create temporary directory for archive
+  file:
+    path: "{{ runner_pkg_tempdir }}"
+    state: directory
+    recurse: yes
+    mode: 0777
+  run_once: yes
+  delegate_to: localhost
+  become: false
+  when: runner_version not in runner_installed.stdout
+  tags:
+    - install
+
+- name: Download runner package version - "{{ runner_version }}" (RUN ONCE)
+  get_url:
+    url: "https://github.com/actions/runner/releases/download/v{{ runner_version }}/\
+          actions-runner-osx-{{ github_actions_architecture }}-{{ runner_version }}.tar.gz"
+    dest: "{{ runner_pkg_tempdir }}/actions-runner-osx-{{ runner_version }}.tar.gz"
+    force: no
+  run_once: yes
+  become: false
+  delegate_to: localhost
+  when: runner_version not in runner_installed.stdout or reinstall_runner
+  tags:
+    - install
+
+- name: Transfer runner package
+  copy:
+    src: "{{ runner_pkg_tempdir }}/actions-runner-osx-{{ runner_version }}.tar.gz"
+    dest: "{{ runner_dir }}/"
+    owner: "{{ runner_user }}"
+    force: no
+  when: runner_version not in runner_installed.stdout or reinstall_runner
+  tags:
+    - install
+
+# `ansible.builtin.unarchive` module requires gnu-tar
+# See also: https://github.com/ansible/ansible/issues/35645
+- name: Unarchive package
+  shell:
+    cmd: "tar xzf actions-runner-osx-{{ runner_version }}.tar.gz"
+    chdir: "{{ runner_dir }}"
+  when: runner_version not in runner_installed.stdout or reinstall_runner
+  tags:
+    - install
+
+- name: Register runner (if new installation) for repo
+  command: "{{ runner_dir }}/./config.sh --url {{ github_url }}/{{ github_owner | default(github_account) }}/{{ github_repo }} \
+            --token {{ registration.json.token }} --name {{ runner_name }} --labels {{ runner_labels | join(',') }} --unattended"
+  args:
+    chdir: "{{ runner_dir }}"
+  become: yes
+  become_user: "{{ runner_user }}"
+  no_log: "{{ hide_sensitive_logs | bool }}"
+  when: runner_name not in registered_runners.json.runners|map(attribute='name')|list and not runner_org
+  tags:
+    - install
+
+- name: Register runner (if new installation) for organization
+  command: "{{ runner_dir }}/./config.sh --url {{ github_url }}/{{ github_owner | default(github_account) }} \
+            --token {{ registration.json.token }} --name {{ runner_name }} --labels {{ runner_labels | join(',') }} --unattended"
+  args:
+    chdir: "{{ runner_dir }}"
+  become: yes
+  become_user: "{{ runner_user }}"
+  no_log: "{{ hide_sensitive_logs | bool }}"
+  when: runner_name not in registered_runners.json.runners|map(attribute='name')|list and runner_org
+  tags:
+    - install
+
+- name: Replace registered runner for repo
+  command: "{{ runner_dir }}/config.sh --url {{ github_url }}/{{ github_owner | default(github_account) }}/{{ github_repo }} \
+            --token {{ registration.json.token }} --name {{ runner_name }} --labels {{ runner_labels | join(',') }} --unattended --replace"
+  args:
+    chdir: "{{ runner_dir }}"
+  become: yes
+  become_user: "{{ runner_user }}"
+  no_log: "{{ hide_sensitive_logs | bool }}"
+  when: runner_name in registered_runners.json.runners|map(attribute='name')|list and reinstall_runner and not runner_org
+  tags:
+    - install
+
+- name: Replace registered runner for organization
+  command: "{{ runner_dir }}/config.sh --url {{ github_url }}/{{ github_owner | default(github_account) }} \
+            --token {{ registration.json.token }} --name {{ runner_name }} --labels {{ runner_labels | join(',') }} --unattended --replace"
+  args:
+    chdir: "{{ runner_dir }}"
+  become: yes
+  become_user: "{{ runner_user }}"
+  no_log: "{{ hide_sensitive_logs | bool }}"
+  when: runner_name in registered_runners.json.runners|map(attribute='name')|list and reinstall_runner and runner_org
+  tags:
+    - install
+
+- name: Set runner_plist_path variable
+  set_fact:
+    runner_plist_path: "{{ ansible_env.HOME }}/Library/LaunchAgents/{{ runner_service }}.plist"
+
+- name: Check if runner service installed
+  stat:
+    path: "{{ runner_plist_path }}"
+  register: _stat_runner_plist_path
+  tags:
+    - install
+
+- name: Install service
+  command: "./svc.sh install {{ runner_user }}"
+  args:
+    chdir: "{{ runner_dir }}"
+  when: _stat_runner_plist_path.stat.exists == False
+  tags:
+    - install
+
+# TODO launchctl bootstrap may only works on Big Sur
+- name: START and enable Github Actions Runner service
+  shell: |
+    launchctl bootstrap gui/$(id -u {{ runner_user }}) {{ runner_plist_path }} \
+    || launchctl print gui/$(id -u {{ runner_user }})/{{ runner_service }}
+  when: runner_state|lower == "started"
+  tags:
+    - install
+
+- name: STOP and disable Github Actions Runner service
+  shell: "launchctl bootout gui/$(id -u {{ runner_user }}) {{ runner_plist_path }}"
+  when: runner_state|lower == "stopped"
+  tags:
+    - install
