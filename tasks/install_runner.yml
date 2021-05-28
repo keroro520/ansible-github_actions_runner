@@ -2,5 +2,8 @@
 - include: install_darwin_runner.yml
   when: ansible_os_family == "Darwin"
 
-- include: install_linuxn_runner.yml
-  when: ansible_os_family != "Darwin"
+- include: install_windows_runner.yml
+  when: ansible_os_family == "Windows"
+
+- include: install_linux_runner.yml
+  when: ansible_os_family != "Darwin" and ansible_os_family != "Windows"

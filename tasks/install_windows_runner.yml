@@ -1,0 +1,143 @@
+---
+- name: Create directory
+  win_file:
+    path: "{{ runner_dir }}"
+    state: directory
+  tags:
+    - install
+
+- name: Find the latest runner version (RUN ONCE)
+  uri:
+    url: "https://api.github.com/repos/actions/runner/releases/latest"
+    headers:
+      Content-Type: "application/json"
+    method: GET
+    return_content: yes
+    status_code: 200
+    body_format: json
+  register: api_response
+  run_once: yes
+  become: false
+  delegate_to: localhost
+  when: runner_version == "latest"
+  tags:
+    - install
+
+- name: Set runner_version variable (if it is latest)
+  set_fact:
+    runner_version: "{{ api_response.json.tag_name | regex_replace('^v', '') }}"
+    runner_user_password: "{{ lookup('env', 'RUNNER_USER_PASSWORD') }}"
+  when: runner_version == "latest"
+
+- name: Check if desired version already installed
+  ansible.windows.win_powershell:
+    script: "sls {{ runner_version }} {{ runner_dir }}/bin/Runner.Listener.deps.json"
+  register: runner_installed
+  changed_when: False
+  ignore_errors: yes
+  tags:
+    - install
+
+- name: Create temporary directory for archive
+  file:
+    path: "{{ runner_pkg_tempdir }}"
+    state: directory
+  run_once: yes
+  delegate_to: localhost
+  become: false
+  when: runner_version not in runner_installed.output
+  tags:
+    - install
+
+- name: Download runner package version - "{{ runner_version }}" (RUN ONCE)
+  get_url:
+    url: "https://github.com/actions/runner/releases/download/v{{ runner_version }}/\
+          actions-runner-win-{{ github_actions_architecture }}-{{ runner_version }}.zip"
+    dest: "{{ runner_pkg_tempdir }}/actions-runner-win-{{ runner_version }}.zip"
+    force: no
+  run_once: yes
+  become: false
+  delegate_to: localhost
+  when: runner_version not in runner_installed.output or reinstall_runner
+  tags:
+    - install
+
+- name: Transfer runner package
+  win_copy:
+    src: "{{ runner_pkg_tempdir }}/actions-runner-win-{{ runner_version }}.zip"
+    dest: "{{ runner_dir }}/"
+    force: no
+  when: runner_version not in runner_installed.output or reinstall_runner
+  tags:
+    - install
+
+- name: Unarchive package
+  community.windows.win_unzip:
+    src: "{{ runner_dir }}/actions-runner-win-{{ runner_version }}.zip"
+    dest: "{{ runner_dir }}/"
+  when: runner_version not in runner_installed.output or reinstall_runner
+  tags:
+    - install
+
+- name: Register runner (if new installation) for repo
+  win_shell: "{{ runner_dir }}/./config.cmd --url {{ github_url }}/{{ github_owner | default(github_account) }}/{{ github_repo }} \
+            --token {{ registration.json.token }} --name {{ runner_name }} --labels {{ runner_labels | join(',') }} --unattended \
+            --windowslogonaccount {{ runner_user }} --windowslogonpassword '{{ runner_user_password }}' --runasservice"
+  args:
+    chdir: "{{ runner_dir }}"
+  become: yes
+  become_user: "{{ runner_user }}"
+  no_log: "{{ hide_sensitive_logs | bool }}"
+  when: runner_name not in registered_runners.json.runners|map(attribute='name')|list and not runner_org
+  tags:
+    - install
+
+- name: Register runner (if new installation) for organization
+  win_shell: "{{ runner_dir }}/./config.cmd --url {{ github_url }}/{{ github_owner | default(github_account) }} \
+            --token {{ registration.json.token }} --name {{ runner_name }} --labels {{ runner_labels | join(',') }} --unattended \
+            --windowslogonaccount {{ runner_user }} --windowslogonpassword '{{ runner_user_password }}' --runasservice"
+  args:
+    chdir: "{{ runner_dir }}"
+  become: yes
+  become_user: "{{ runner_user }}"
+  no_log: "{{ hide_sensitive_logs | bool }}"
+  when: runner_name not in registered_runners.json.runners|map(attribute='name')|list and runner_org
+  tags:
+    - install
+
+- name: Replace registered runner for repo
+  win_shell: "{{ runner_dir }}/config.cmd --url {{ github_url }}/{{ github_owner | default(github_account) }}/{{ github_repo }} \
+            --token {{ registration.json.token }} --name {{ runner_name }} --labels {{ runner_labels | join(',') }} --unattended --replace \
+            --windowslogonaccount {{ runner_user }} --windowslogonpassword '{{ runner_user_password }}' --runasservice"
+  args:
+    chdir: "{{ runner_dir }}"
+  become: yes
+  become_user: "{{ runner_user }}"
+  no_log: "{{ hide_sensitive_logs | bool }}"
+  when: runner_name in registered_runners.json.runners|map(attribute='name')|list and reinstall_runner and not runner_org
+  tags:
+    - install
+
+- name: Replace registered runner for organization
+  win_shell: "{{ runner_dir }}/config.cmd --url {{ github_url }}/{{ github_owner | default(github_account) }} \
+            --token {{ registration.json.token }} --name {{ runner_name }} --labels {{ runner_labels | join(',') }} --unattended --replace \
+            --windowslogonaccount {{ runner_user }} --windowslogonpassword '{{ runner_user_password }}' --runasservice"
+  args:
+    chdir: "{{ runner_dir }}"
+  become_user: "{{ runner_user }}"
+  no_log: "{{ hide_sensitive_logs | bool }}"
+  when: runner_name in registered_runners.json.runners|map(attribute='name')|list and reinstall_runner and runner_org
+  tags:
+    - install
+
+- name: START and enable Github Actions Runner service
+  win_shell: Start-Service "actions.runner.*"
+  when: runner_state|lower == "started"
+  tags:
+    - install
+
+- name: STOP and disable Github Actions Runner service
+  win_shell: Stop-Service "actions.runner.*"
+  when: runner_state|lower == "stopped"
+  tags:
+    - install

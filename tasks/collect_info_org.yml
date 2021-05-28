@@ -10,6 +10,7 @@
     force_basic_auth: yes
   register: registration
   run_once: yes
+  delegate_to: localhost
   tags:
     - install
     - uninstall
@@ -25,12 +26,14 @@
     force_basic_auth: yes
   register: registered_runners
   run_once: yes
+  delegate_to: localhost
   tags:
     - install
     - uninstall
 
 - name: Check service facts
   service_facts:
+  when: ansible_os_family != "Windows"
   tags:
     - install
     - uninstall
