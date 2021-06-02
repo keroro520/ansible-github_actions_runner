@@ -26,7 +26,6 @@
 - name: Set runner_version variable (if it is latest)
   set_fact:
     runner_version: "{{ api_response.json.tag_name | regex_replace('^v', '') }}"
-    runner_user_password: "{{ lookup('env', 'RUNNER_USER_PASSWORD') }}"
   when: runner_version == "latest"
 
 - name: Check if desired version already installed
