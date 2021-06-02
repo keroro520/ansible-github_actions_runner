@@ -11,6 +11,7 @@
   register: registration
   run_once: yes
   delegate_to: localhost
+  become: no
   tags:
     - install
     - uninstall
@@ -27,6 +28,7 @@
   register: registered_runners
   run_once: yes
   delegate_to: localhost
+  become: no
   tags:
     - install
     - uninstall
